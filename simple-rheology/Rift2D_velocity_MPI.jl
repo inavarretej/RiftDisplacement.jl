@@ -8,7 +8,7 @@ end
 using JustRelax, JustRelax.JustRelax2D, JustRelax.DataIO
 import JustRelax.@cell
 
-const backend = @static if isCUDA
+const backend_JR = @static if isCUDA
     CUDABackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
 else
     JustRelax.CPUBackend # Options: CPUBackend, CUDABackend, AMDGPUBackend
@@ -33,7 +33,7 @@ else
 end
 
 # Load script dependencies
-using GeoParams,CellArrays
+using GeoParams,CellArrays,CairoMakie
 using JLD2
 #using  GLMakie
 
@@ -120,7 +120,7 @@ end
 
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
 do_vtk   = true # set to true to generate VTK files for ParaView
-figdir   = "output/Rift2D_displacement_MPI"
+figdir   = "output/Rift2D_velocity_MPI"
 n        = 512
 nx, ny   = n, n ÷ 2
 # li, origin, phases_GMG, T_GMG = Setup_Topo(nx+1, ny+1)
@@ -170,7 +170,7 @@ function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk
     pPhases, pT    = init_cell_arrays(particles, Val(2))
     particle_args  = (pT, pPhases)
     # Assign particles phases anomaly
-    phases_device = PTArray(backend)(phases_GMG)
+    phases_device = PTArray(backend_JR)(phases_GMG)
     phase_ratios  = phase_ratios = PhaseRatios(backend_JP, length(rheology), ni)
     init_phases!(pPhases, phases_device, particles, xvi)
     update_phase_ratios!(phase_ratios, particles, xci, xvi, pPhases)
@@ -178,7 +178,7 @@ function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk
 
     # RockRatios
     air_phase = 4
-    ϕ_R = RockRatio(backend, ni)
+    ϕ_R = RockRatio(backend_JR, ni)
     update_rock_ratio!(ϕ_R, phase_ratios, air_phase)
  
     # marker chain
@@ -191,7 +191,7 @@ function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk
   
     # STOKES ---------------------------------------------
     # Allocate arrays needed for every Stokes problem
-    stokes           = StokesArrays(backend, ni)
+    stokes           = StokesArrays(backend_JR, ni)
     # pt_stokes        = PTStokesCoeffs(li, di; ϵ=1e-4, Re=3π, r=1e0, CFL = 1 / √2.1) # Re=3π, r=0.7
      pt_stokes        = PTStokesCoeffs(li, di;  ϵ_rel=1e-5,ϵ_abs=1e-4, Re=3*√10*π/2, r=0.5, CFL = 0.85 / √2.1) # Re=3π, r=0.7
     # ----------------------------------------------------
@@ -199,8 +199,8 @@ function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk
     # TEMPERATURE PROFILE --------------------------------
     Ttop             = minimum(T_GMG)
     Tbot             = maximum(T_GMG)
-    thermal          = ThermalArrays(backend, ni)
-    @views thermal.T[2:end-1, :] .= PTArray(backend)(T_GMG)
+    thermal          = ThermalArrays(backend_JR, ni)
+    @views thermal.T[2:end-1, :] .= PTArray(backend_JR)(T_GMG)
 
     # Add thermal anomaly BC's
     T_air = 273.0e0
@@ -219,7 +219,7 @@ function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk
     # Buoyancy forces
     ρg               = ntuple(_ -> @zeros(ni...), Val(2))
     compute_ρg!(ρg[2], phase_ratios, rheology, (T=thermal.Tc, P=stokes.P))
-    stokes.P        .= PTArray(backend)(reverse(cumsum(reverse((ρg[2]).* di[2], dims=2), dims=2), dims=2))
+    stokes.P        .= PTArray(backend_JR)(reverse(cumsum(reverse((ρg[2]).* di[2], dims=2), dims=2), dims=2))
 
     # Rheology
     args0            = (T=thermal.Tc, P=stokes.P, dt = Inf)
@@ -228,7 +228,7 @@ function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk
 
     # PT coefficients for thermal diffusion
     pt_thermal       = PTThermalCoeffs(
-        backend, rheology, phase_ratios, args0, dt, ni, di, li; ϵ=1e-5, CFL=0.98 / √2.1
+        backend_JR, rheology, phase_ratios, args0, dt, ni, di, li; ϵ=1e-5, CFL=0.98 / √2.1
     )
 
     flow_bcs         = VelocityBoundaryConditions(;
@@ -305,6 +305,7 @@ function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk
     end
     grid2particle!(pT, xvi, T_buffer, particles)
 
+    P_lith = @zeros(ni...)
     # Time loop
     t, it = 0.0, 0
 
@@ -312,7 +313,9 @@ function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk
     # cohesion_damage = @rand(ni...) .* 0.05 # 5% random cohesion damage
 
     while it < 500 # run only for 5 Myrs
-
+        if it == 1
+            P_lith .= stokes.P
+        end
         # BC_topography_displ(stokes.U.Ux, stokes.U.Uy, εbg, xvi, li..., dt)
         # flow_bcs!(stokes, flow_bcs) # apply boundary conditions
         # update_halo!(@velocity(stokes)...)
@@ -343,7 +346,7 @@ function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk
                 dt,
                 igg;
                 kwargs = (;
-                    iterMax = it > 0 ? 250e3 : 1.0e7,
+                    iterMax = it > 0 ? 250e3 : 1.0e8,
                     strain_increment = true,
                     free_surface = true,
                     nout = 1e3,
@@ -505,18 +508,60 @@ function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk
                 particle_args = particle_args,
             )
 
-            fig = Figure(resolution = (800, 400))
+            fig1 = Figure(size = (800, 400))
 
             # Add an axis
-            ax = Axis(fig[1, 1],  title = "Err vs PT-Iteration", xlabel = "Pseudo-Iteration", ylabel = "Error Abs")
-            lines!(ax, 1:length(result.err_evo1), result.err_evo1, color = :blue)
-            scatter!(ax, 1:length(result.err_evo1), result.err_evo1, color = :red)
-            savefig(p, 
-            joinpath(fig_dir, "err_" * lpad("$it", 6, "0")))
+            ax = Axis(fig1[1, 1],  title = "Err vs PT-Iteration", xlabel = "Pseudo-Iteration", ylabel = "log10(Error Abs)")
+            lines!(ax, 1:length(result.err_evo1), log10.(result.err_evo1), color = :blue)
+            scatter!(ax, 1:length(result.err_evo1), log10.(result.err_evo1), color = :red)
+            save(joinpath(fig_dir, "err_" * lpad("$it", 6, "0") * ".png"),fig1)
 
             # Make particles plottable
             tensor_invariant!(stokes.ε)
             tensor_invariant!(stokes.ε_pl)
+
+            chain_x = chain.coords[1].data[:] ./ 1.0e3
+            chain_y = chain.coords[2].data[:] ./ 1.0e3
+            ar = DataAspect()
+            fig2 = Figure(size = (1200, 900), title = "t = $t")
+            ax1 = Axis(fig2[1, 1], aspect = ar, title = "τxx [MPa]")
+            ax2 = Axis(fig2[2, 1], aspect = ar, title = "Vx [cm/yr]")
+            ax3 = Axis(fig2[1, 3], aspect = ar, title = "τII [MPa]")
+            ax4 = Axis(fig2[2, 3], aspect = ar, title = "log10(η)")
+            ax5 = Axis(fig2[3, 1], aspect = ar, title = "EII_pl")
+            ax6 = Axis(fig2[3, 3], aspect = ar, title = "ΔP from P_lith")
+            # Plot temperature
+            h1 = heatmap!(ax1, xvi[1] .* 1.0e-3, xvi[2] .* 1.0e-3, Array(stokes.τ.xx), colormap = :batlow)
+            # Plot velocity
+            V_range = maximum(abs.(extrema(ustrip.(uconvert.(u"cm/yr", Array(stokes.V.Vx)u"m/s")))))
+            h2 = heatmap!(ax2, xvi[1] .* 1.0e-3, xvi[2] .* 1.0e-3, ustrip.(uconvert.(u"cm/yr", Array(stokes.V.Vx)u"m/s")), colormap = :vik, colorrange= (-V_range, V_range))
+            scatter!(ax2, Array(chain_x), Array(chain_y), color = :red, markersize = 3)
+            # Plot 2nd invariant of stress
+            h3 = heatmap!(ax3, xci[1] .* 1.0e-3, xci[2] .* 1.0e-3, Array(stokes.τ.II) ./ 1.0e6, colormap = :batlow)
+            # Plot effective viscosity
+            h4 = heatmap!(ax4, xci[1] .* 1.0e-3, xci[2] .* 1.0e-3, Array(log10.(stokes.viscosity.η_vep)), colorrange = log10.(viscosity_cutoff), colormap = :batlow)
+            h5 = heatmap!(ax5, xci[1] .* 1.0e-3, xci[2] .* 1.0e-3, Array(stokes.EII_pl), colormap = :batlow)
+            # contour!(ax5, xci[1] .* 1.0e-3, xci[2] .* 1.0e-3, Array(ϕ_m), levels = [0.5, 0.75, 1.0], color = :white, linewidth = 1.5, labels=true)
+            # h6  = heatmap!(ax6, xci[1].*1e-3, xci[2].*1e-3, Array(ϕ_m) , colormap=:lipari, colorrange=(0.0,1.0))
+            h6 = heatmap!(ax6, xci[1] .* 1.0e-3, xci[2] .* 1.0e-3, (Array(stokes.P) .- Array(P_lith)) ./ 1.0e6, colormap = :roma)
+
+            hidexdecorations!(ax1)
+            hidexdecorations!(ax2)
+            hidexdecorations!(ax3)
+            hidexdecorations!(ax4)
+            hideydecorations!(ax3)
+            hideydecorations!(ax4)
+            hideydecorations!(ax6)
+
+            Colorbar(fig2[1, 2], h1, ticks = 0.0:100:maximum(thermal.T .- 273))
+            Colorbar(fig2[2, 2], h2)
+            Colorbar(fig2[1, 4], h3)
+            Colorbar(fig2[2, 4], h4)
+            Colorbar(fig2[3, 2], h5)
+            Colorbar(fig2[3, 4], h6)
+            linkaxes!(ax1, ax2, ax3, ax4, ax5)
+            fig2
+            save(joinpath(fig_dir, "sol_" * lpad("$it", 6, "0") * ".png"), fig2)
 
             # allocate CellArrays to store the velocity field of the marker chain
             chain_V = similar(chain.coords[1]), similar(chain.coords[1])

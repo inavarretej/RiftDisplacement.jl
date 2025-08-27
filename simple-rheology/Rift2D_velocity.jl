@@ -1,5 +1,5 @@
-const isCUDA = false
-#const isCUDA = true
+#const isCUDA = false
+const isCUDA = true
 
 @static if isCUDA
     using CUDA
@@ -121,7 +121,7 @@ end
 
 ## END OF MAIN SCRIPT ----------------------------------------------------------------
 do_vtk   = true # set to true to generate VTK files for ParaView
-figdir   = "output/Rift2D_displacement"
+figdir   = "output/Rift2D_velocity"
 n        = 128
 nx, ny   = n, n ÷ 2
 # li, origin, phases_GMG, T_GMG = Setup_Topo(nx+1, ny+1)
@@ -138,7 +138,7 @@ else
 end
 
 ## BEGIN OF MAIN SCRIPT --------------------------------------------------------------
-#function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk =false)
+function main(li, origin, phases_GMG, igg; nx=16, ny=16, figdir="figs2D", do_vtk =false)
 
     # Physical domain ------------------------------------
     ni                  = nx, ny           # number of cells
@@ -279,14 +279,18 @@ end
     end
     grid2particle!(pT, xvi, T_buffer, particles)
 
+    P_lith = @zeros(ni...)
     # Time loop
     t, it = 0.0, 0
 
     # uncomment for random cohesion damage
     # cohesion_damage = @rand(ni...) .* 0.05 # 5% random cohesion damage
 
-    while it < 10 # run only for 5 Myrs
-
+    while it < 500 # run only for 5 Myrs
+        if it == 1
+            P_lith .= stokes.P
+        end
+        
         # BC_topography_displ(stokes.U.Ux, stokes.U.Uy, εbg, xvi, li..., dt)
         # flow_bcs!(stokes, flow_bcs) # apply boundary conditions
         # update_halo!(@velocity(stokes)...)
@@ -317,10 +321,10 @@ end
                 dt,
                 igg;
                 kwargs = (;
-                    iterMax = it > 0 ? 250.0e3 : 500.0e4,
+                    iterMax = it > 0 ? 250.0e3 : 1.0e8,
                     free_surface = true,
                     strain_increment=true,
-                    nout = 1e3,
+                    nout = 1e4,
                     viscosity_cutoff = viscosity_cutoff,
                 )
             );
@@ -457,18 +461,61 @@ end
             )
 
 
-            fig = Figure(resolution = (800, 400))
+            fig = Figure(size = (800, 400))
 
             # Add an axis
-            ax = Axis(fig[1, 1],  title = "Err vs PT-Iteration", xlabel = "Pseudo-Iteration", ylabel = "Error Abs")
-            lines!(ax, 1:length(result.err_evo1), result.err_evo1, color = :blue)
-            scatter!(ax, 1:length(result.err_evo1), result.err_evo1, color = :red)
-            savefig(p, 
-            joinpath(fig_dir, "err_" * lpad("$it", 6, "0")))
+            ax = Axis(fig[1, 1],  title = "Err vs PT-Iteration", xlabel = "Pseudo-Iteration", ylabel = "log10(Error Abs)")
+            lines!(ax, 1:length(result.err_evo1), log10.(result.err_evo1), color = :blue)
+            scatter!(ax, 1:length(result.err_evo1), log10.(result.err_evo1), color = :red)
+            save(joinpath(fig_dir, "err_" * lpad("$it", 6, "0") * ".png"),fig)
 
             # Make particles plottable
             tensor_invariant!(stokes.ε)
             tensor_invariant!(stokes.ε_pl)
+
+
+            chain_x = chain.coords[1].data[:] ./ 1.0e3
+            chain_y = chain.coords[2].data[:] ./ 1.0e3
+            ar = DataAspect()
+            fig2 = Figure(size = (1200, 900), title = "t = $t")
+            ax1 = Axis(fig2[1, 1], aspect = ar, title = "τxx [MPa]")
+            ax2 = Axis(fig2[2, 1], aspect = ar, title = "Vx [cm/yr]")
+            ax3 = Axis(fig2[1, 3], aspect = ar, title = "τII [MPa]")
+            ax4 = Axis(fig2[2, 3], aspect = ar, title = "log10(η)")
+            ax5 = Axis(fig2[3, 1], aspect = ar, title = "EII_pl")
+            ax6 = Axis(fig2[3, 3], aspect = ar, title = "ΔP from P_lith")
+            # Plot temperature
+            h1 = heatmap!(ax1, xvi[1] .* 1.0e-3, xvi[2] .* 1.0e-3, Array(stokes.τ.xx), colormap = :batlow)
+            # Plot velocity
+            V_range = maximum(abs.(extrema(ustrip.(uconvert.(u"cm/yr", Array(stokes.V.Vx)u"m/s")))))
+            h2 = heatmap!(ax2, xvi[1] .* 1.0e-3, xvi[2] .* 1.0e-3, ustrip.(uconvert.(u"cm/yr", Array(stokes.V.Vx)u"m/s")), colormap = :vik, colorrange= (-V_range, V_range))
+            scatter!(ax2, Array(chain_x), Array(chain_y), color = :red, markersize = 3)
+            # Plot 2nd invariant of stress
+            h3 = heatmap!(ax3, xci[1] .* 1.0e-3, xci[2] .* 1.0e-3, Array(stokes.τ.II) ./ 1.0e6, colormap = :batlow)
+            # Plot effective viscosity
+            h4 = heatmap!(ax4, xci[1] .* 1.0e-3, xci[2] .* 1.0e-3, Array(log10.(stokes.viscosity.η_vep)), colorrange = log10.(viscosity_cutoff), colormap = :batlow)
+            h5 = heatmap!(ax5, xci[1] .* 1.0e-3, xci[2] .* 1.0e-3, Array(stokes.EII_pl), colormap = :batlow)
+            # contour!(ax5, xci[1] .* 1.0e-3, xci[2] .* 1.0e-3, Array(ϕ_m), levels = [0.5, 0.75, 1.0], color = :white, linewidth = 1.5, labels=true)
+            # h6  = heatmap!(ax6, xci[1].*1e-3, xci[2].*1e-3, Array(ϕ_m) , colormap=:lipari, colorrange=(0.0,1.0))
+            h6 = heatmap!(ax6, xci[1] .* 1.0e-3, xci[2] .* 1.0e-3, (Array(stokes.P) .- Array(P_lith)) ./ 1.0e6, colormap = :roma)
+
+            hidexdecorations!(ax1)
+            hidexdecorations!(ax2)
+            hidexdecorations!(ax3)
+            hidexdecorations!(ax4)
+            hideydecorations!(ax3)
+            hideydecorations!(ax4)
+            hideydecorations!(ax6)
+
+            Colorbar(fig2[1, 2], h1, ticks = 0.0:100:maximum(thermal.T .- 273))
+            Colorbar(fig2[2, 2], h2)
+            Colorbar(fig2[1, 4], h3)
+            Colorbar(fig2[2, 4], h4)
+            Colorbar(fig2[3, 2], h5)
+            Colorbar(fig2[3, 4], h6)
+            linkaxes!(ax1, ax2, ax3, ax4, ax5)
+            fig2
+            save(joinpath(fig_dir, "sol_" * lpad("$it", 6, "0") * ".png"), fig2)
 
             # allocate CellArrays to store the velocity field of the marker chain
             chain_V = similar(chain.coords[1]), similar(chain.coords[1])
@@ -492,10 +539,10 @@ end
 
 
     return nothing
-#end
+end
 
 
 
 
-#main(li, origin, phases_GMG, igg; figdir = figdir, nx = nx, ny = ny, do_vtk = do_vtk);
+main(li, origin, phases_GMG, igg; figdir = figdir, nx = nx, ny = ny, do_vtk = do_vtk);
 

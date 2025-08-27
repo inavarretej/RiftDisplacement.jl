@@ -32,7 +32,7 @@ function flat_setup(Nx, Nz)
      add_box!(Phases, Temp, Grid; 
               xlim=(-1.5,1.5),
               ylim=(-Ly, Ly), 
-              zlim=(0.5, -20), 
+              zlim=(0.5, -10), 
               phase = ConstantPhase(3), 
               DipAngle=-30);
 
